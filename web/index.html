@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PaperS3 · Bluetooth library</title>
+<link rel="icon" type="image/png" href="./papers3-library.png">
+<style>
+:root{color-scheme:light;--paper:#f5f3ec;--ink:#243b31;--green:#25674e;--muted:#65756a;--line:#dce1d7}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.6 system-ui,sans-serif}main{max-width:940px;margin:auto;padding:32px 24px}header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:20px;font-weight:750;font-size:21px}.brand{display:flex;align-items:center;gap:12px}.brand img{width:40px;height:40px;object-fit:contain;mix-blend-mode:multiply;flex-shrink:0}header .mode{font-size:12px;font-weight:500;color:var(--muted)}h1{font:400 clamp(34px,6vw,50px)/1.12 Georgia,serif;letter-spacing:-1px;margin:38px 0 14px}.intro{color:var(--muted);max-width:670px;margin:0 0 28px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.card{background:#fffefa;border:1px solid var(--line);border-radius:16px;padding:24px;margin-bottom:20px}h2{font-size:17px;margin:0 0 12px}p{margin:10px 0}button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--green);border-radius:8px;padding:10px 16px;font-size:13px;font-weight:650}button.primary{background:var(--green);color:white;border-color:var(--green)}button:disabled{opacity:.4;cursor:not-allowed}button:focus-visible,input:focus-visible{outline:3px solid #8eb29a;outline-offset:2px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}label{display:block;font-size:12px;color:var(--muted);margin:14px 0 5px}input[type=password]{width:100%;border:1px solid var(--line);background:white;padding:10px;border-radius:8px}input[type=file]{max-width:100%;font-size:13px}.small{color:var(--muted);font-size:12px}.status{margin:0 0 24px;overflow-wrap:anywhere}.status[data-error=true]{color:#a1372c}.capacity{font:34px Georgia,serif;margin:18px 0}progress{width:100%;accent-color:var(--green);height:10px;margin-top:18px}.path{overflow-wrap:anywhere;color:var(--muted);font-size:12px}.row{display:flex;gap:16px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding:15px 0}.name{overflow-wrap:anywhere;font-weight:650;font-size:14px;min-width:0}.meta{color:var(--muted);font-size:12px;font-weight:400}.row .actions{margin:0;flex-shrink:0}.danger{color:#a1372c}.pager{display:flex;justify-content:space-between;gap:12px;margin-top:20px}a{color:var(--green)}[hidden]{display:none!important}@media(max-width:640px){main{padding:24px 18px}.grid{grid-template-columns:1fr;gap:0}.row{align-items:start;flex-direction:column}.row .actions{width:100%}.row button{flex:1}.card{padding:20px}header .mode{font-size:11px}}
+</style></head><body><main>
+<header><div class="brand"><img src="./papers3-library.png" alt="PaperS3 logo" width="40" height="40">Paper S3</div><span class="mode">BLUETOOTH LIBRARY</span></header>
+<h1>Your library, without Wi-Fi.</h1><p class="intro">On your reader, open <strong>Bluetooth</strong>. Connect below and enter the six-digit access code shown on its screen. Keep the reader nearby while sending a book.</p>
+<p id="status" class="status" role="status" aria-live="polite">Ready to connect. Use Chrome or Edge on localhost or HTTPS.</p>
+<div class="grid"><section class="card"><h2>Your reader</h2><p id="device" class="small">No reader connected</p><div class="actions"><button class="primary" id="connect">Connect reader</button><button id="disconnect" disabled>Disconnect</button></div><form id="auth" hidden><label for="password">Six-digit access code shown on the reader</label><input id="password" type="password" autocomplete="current-password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required><div class="actions"><button class="primary">Unlock library</button></div></form><p id="storage" class="capacity">—</p><p class="small">Wireless settings are available in <a href="https://fbiego.com/espconfig/" target="_blank" rel="noopener">ESPConfig → Connect BLE</a>. Disconnect this tool first to free the BLE connection.</p></section>
+<section class="card"><h2>Add a book</h2><p class="small">Choose a DRM-free EPUB. BLE transfers are slower than Wi-Fi; keep this page open until validation finishes.</p><label for="book">EPUB file</label><input id="book" type="file" accept=".epub" disabled><div class="actions"><button class="primary" id="upload" disabled>Send to reader</button><button id="cancel" hidden>Cancel transfer</button></div><progress id="progress" max="100" value="0" hidden></progress><p class="small">Existing filenames are never overwritten. Files stay on internal storage.</p></section></div>
+<section class="card"><h2>Files on your reader</h2><p class="path" id="path">Internal storage · /books</p><div class="actions"><button id="root" disabled>Root folder</button><button id="books" disabled>Books</button><button id="up" disabled>Up a folder</button><button id="refresh" disabled>Refresh files</button></div><div id="files"></div><div class="pager"><button id="previous" disabled>Previous files</button><button id="next" disabled>Next files</button></div></section>
+<p class="small">Stop Bluetooth on the reader to return to the library. Bluetooth also turns off after five minutes without activity.</p>
+</main><script type="module">
+import {ReaderBle} from './ble-client.js';
+const $ = id => document.getElementById(id);
+let unlocked = false, busy = false, dir = '/books', offset = 0, next = 0, more = false, cancellation = null;
+const reader = new ReaderBle({disconnected:() => { unlocked = false; busy = false; message('Reader disconnected. Reconnect to continue.', true); sync(); }});
+function message(text, error = false) { $('status').textContent = text; $('status').dataset.error = error; }
+function size(bytes) { return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MiB' : Math.ceil(bytes / 1024) + ' KiB'; }
+function sync() {
+  $('connect').disabled = reader.connected || busy; $('disconnect').disabled = !reader.connected;
+  $('auth').hidden = !reader.connected || unlocked;
+  $('book').disabled = !unlocked || busy; $('upload').disabled = !unlocked || busy || !$('book').files.length;
+  for (const id of ['root','books','up','refresh','previous','next']) $(id).disabled = !unlocked || busy;
+  $('up').disabled ||= dir === '/'; $('previous').disabled ||= offset === 0; $('next').disabled ||= !more;
+  document.querySelectorAll('#files button, #auth button').forEach(button => { button.disabled = busy; });
+  $('cancel').hidden = !cancellation;
+}
+async function run(work) {
+  if (busy) return;
+  busy = true; sync();
+  try { await work(); } catch (error) { message(error.message, true); }
+  finally { busy = false; cancellation = null; sync(); }
+}
+async function storage() {
+  const result = await reader.request({op:'storage'}); $('storage').textContent = size(result.free) + ' available';
+}
+async function list(folder = dir, start = offset) {
+  message('Reading files from the reader...');
+  const result = await reader.list(folder, start);
+  dir = result.directory; offset = result.offset; next = result.nextOffset; more = result.more;
+  $('path').textContent = 'Internal storage · ' + dir; $('files').replaceChildren();
+  for (const file of result.files) {
+    const row = document.createElement('div'); row.className = 'row';
+    const name = document.createElement('div'); name.className = 'name'; name.textContent = file.name;
+    const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = file.directory ? 'Folder' : size(file.size); name.append(meta);
+    const actions = document.createElement('div'); actions.className = 'actions';
+    function button(text, action, danger = false) { const b = document.createElement('button'); b.textContent = text; if (danger) b.className = 'danger'; b.addEventListener('click', () => run(action)); actions.append(b); }
+    if (file.directory) button('Open folder', () => list(file.path, 0));
+    else {
+      button('Download', async () => {
+        cancellation = {cancelled:false}; $('progress').hidden = false; $('progress').value = 0; sync();
+        const bytes = await reader.download(file.path, progress, cancellation);
+        const url = URL.createObjectURL(new Blob([bytes], {type:'application/octet-stream'}));
+        const link = document.createElement('a'); link.href = url; link.download = file.name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        message('Downloaded ' + file.name + '.');
+      });
+      button('Delete', async () => {
+        if (!confirm('Delete "' + file.name + '" from internal storage? This cannot be undone.')) return;
+        await reader.request({op:'delete',path:file.path}); await list(dir, 0); await storage(); message('Deleted ' + file.name + '.');
+      }, true);
+    }
+    row.append(name,actions); $('files').append(row);
+  }
+  if (!result.files.length) { const empty = document.createElement('p'); empty.className = 'small'; empty.textContent = 'No files in this folder.'; $('files').append(empty); }
+  message('Showing ' + result.files.length + ' entries in ' + dir + '.');
+}
+function progress(done, total) { const percent = total ? Math.round(done * 100 / total) : 100; $('progress').value = percent; message('Transferring... ' + percent + '% (' + size(done) + ' of ' + size(total) + ')'); }
+$('connect').addEventListener('click', () => run(async () => {
+  if (!window.isSecureContext) throw new Error('Open this tool on localhost or HTTPS to use Bluetooth.');
+  const hello = await reader.connect(); $('device').textContent = hello.name; message('Connected. Enter the six-digit access code shown on your reader.');
+}));
+$('disconnect').addEventListener('click', () => reader.disconnect());
+$('auth').addEventListener('submit', event => { event.preventDefault(); run(async () => {
+  await reader.auth($('password').value); $('password').value = ''; unlocked = true;
+  await storage(); await list('/books', 0); message('Library unlocked.');
+}); });
+$('book').addEventListener('change', sync);
+$('upload').addEventListener('click', () => run(async () => {
+  const file = $('book').files[0]; cancellation = {cancelled:false}; $('progress').hidden = false; $('progress').value = 0; sync();
+  await reader.upload(file, progress, cancellation); $('book').value = '';
+  await storage(); await list('/books', 0); message('Book added. Stop Bluetooth on the reader to start reading.');
+}));
+$('cancel').addEventListener('click', () => { if (cancellation) { cancellation.cancelled = true; message('Canceling after the current packet...'); } });
+$('root').addEventListener('click', () => run(() => list('/',0)));
+$('books').addEventListener('click', () => run(() => list('/books',0)));
+$('up').addEventListener('click', () => run(() => list(dir.slice(0, dir.lastIndexOf('/')) || '/',0)));
+$('refresh').addEventListener('click', () => run(async () => { await storage(); await list(); message('Library refreshed.'); }));
+$('previous').addEventListener('click', () => run(() => list(dir,Math.max(0,offset-32))));
+$('next').addEventListener('click', () => run(() => list(dir,next)));
+sync();
+</script></body></html>
