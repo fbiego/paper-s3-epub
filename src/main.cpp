@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <M5GFX.h>
+#include <ReaderJpeg.h>
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -26,6 +27,7 @@ static ReadingState state;
 static std::string chapterText;
 static std::vector<reader::Page> pages;
 static reader::Anchors chapterAnchors;
+static std::vector<reader::Image> chapterImages;
 static size_t chapterIndex = 0, pageIndex = 0, libraryPage = 0, marksPage = 0;
 static bool ready = false, bookOpen = false, touchedBefore = false;
 static int pressedAction = -1;
@@ -111,6 +113,86 @@ static void wrapped(const String& text, int y, int size = 22) {
     y += size + 10;
   }
 }
+static const reader::Image* currentPageImage() {
+  if (view != View::Reading || pageIndex >= pages.size()) return nullptr;
+  for (const auto& image : chapterImages)
+    if (image.begin == pages[pageIndex].offset) return &image;
+  return nullptr;
+}
+static void drawBookImage(const reader::Image& image) {
+  std::string data, error;
+  reader::ImageInfo info;
+  bool drawn = false;
+  if (epub.image(image, data, info, error)) {
+    const int maxWidth = display.width() - 48;
+    const int maxHeight = bodyBottom() - bodyTop - (image.alt.empty() ? 0 : 64);
+    const float scale = std::min(1.0f, std::min(float(maxWidth) / info.width, float(maxHeight) / info.height));
+    const int width = std::max(1, int(info.width * scale));
+    const int height = std::max(1, int(info.height * scale));
+    lgfx::LGFX_Sprite raster(&display);
+    raster.setColorDepth(16);
+    raster.setPsram(true);
+    if (raster.createSprite(width, height)) {
+      // Composite transparency against white and keep illustrations positive
+      // even when the surrounding reader UI uses an inverted theme.
+      raster.fillScreen(TFT_WHITE);
+      const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
+      if (info.format == reader::ImageFormat::Png) {
+        drawn = raster.drawPng(bytes, data.size(), 0, 0, width, height, 0, 0, scale);
+        raster.releasePngMemory();
+      } else {
+        ReaderJpegImage jpeg{};
+        char message[200];
+        const size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        const size_t budget = freePsram > 512 * 1024 ? freePsram - 512 * 1024 : 0;
+        drawn = readerDecodeJpeg(bytes, data.size(), width, height, budget,
+          [] { delay(1); }, &jpeg, message, sizeof(message));
+        if (drawn) {
+          for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+              const uint8_t gray = jpeg.pixels[y * width + x];
+              raster.drawPixel(x, y, uint16_t(((gray >> 3) << 11) | ((gray >> 2) << 5) | (gray >> 3)));
+            }
+            if ((y & 15) == 0) delay(1);
+          }
+        } else error = message;
+        readerFreeJpeg(&jpeg);
+      }
+      if (drawn) {
+        static const uint8_t bayer[4][4] = {{0,8,2,10},{12,4,14,6},{3,11,1,9},{15,7,13,5}};
+        for (int y = 0; y < height; ++y) {
+          for (int x = 0; x < width; ++x) {
+            const uint16_t pixel = raster.readPixel(x, y);
+            const int r = ((pixel >> 11) & 31) * 255 / 31;
+            const int g = ((pixel >> 5) & 63) * 255 / 63;
+            const int b = (pixel & 31) * 255 / 31;
+            const int luminance = (77 * r + 150 * g + 29 * b) >> 8;
+            const int gray = std::min(15, (luminance * 15 + bayer[y & 3][x & 3] * 16) / 255) * 17;
+            raster.drawPixel(x, y, uint16_t(((gray >> 3) << 11) | ((gray >> 2) << 5) | (gray >> 3)));
+          }
+          if ((y & 15) == 0) delay(1);
+        }
+        raster.pushSprite((display.width() - width) / 2, bodyTop + (maxHeight - height) / 2);
+      } else if (error.empty()) error = "Image could not be decoded";
+    } else error = "Not enough memory to display image";
+  }
+  if (!drawn) {
+    label("Image unavailable", 24, bodyTop + 40, 26);
+    wrapped(error.c_str(), bodyTop + 100, 20);
+    if (!image.alt.empty()) wrapped(image.alt.c_str(), bodyTop + 260, 22);
+  } else if (!image.alt.empty()) {
+    uiFont(18, false);
+    auto caption = reader::paginate(image.alt, display.width() - 48, 2,
+      [](const std::string& text) { return display.textWidth(text.c_str()); });
+    if (!caption.empty()) {
+      int y = bodyBottom() - 52;
+      for (const auto& line : caption[0].lines) {
+        display.drawString(image.alt.substr(line.begin, line.end - line.begin).c_str(), 24, y);
+        y += 24;
+      }
+    }
+  }
+}
 static void drawBatteryIndicator() {
   const auto& battery = batteryStatus();
   const int x = display.width() - 230, y = 80;
@@ -187,15 +269,16 @@ static void powerOff() {
   esp_deep_sleep_start();
 }
 static std::vector<reader::Page> layoutChapter(const std::string& text, size_t chapter,
-                                             const reader::Anchors& anchors) {
+                                             const reader::Anchors& anchors,
+                                             const std::vector<reader::Image>& images) {
   uiFont(settings.fontSize, false);
   lineHeight = settings.fontSize + settings.lineGap;
-  return reader::paginate(text, display.width() - 48, (bodyBottom() - bodyTop) / lineHeight,
+  return reader::paginateIllustrated(text, display.width() - 48, (bodyBottom() - bodyTop) / lineHeight,
     [](const std::string& s) {
       static uint32_t checks = 0;
       if ((++checks & 127) == 0) delay(1);
       return display.textWidth(s.c_str());
-    }, epub.pageBreakOffsets(chapter, anchors));
+    }, epub.pageBreakOffsets(chapter, anchors), images);
 }
 static void preparePageIndex() {
   if (indexFontSize != settings.fontSize || indexLineGap != settings.lineGap || chapterPageCounts.size() != epub.spine.size()) {
@@ -205,11 +288,11 @@ static void preparePageIndex() {
   }
 }
 static bool loadChapter(size_t index, uint32_t offset) {
-  chapterText.clear(); chapterText.shrink_to_fit(); pages.clear();
+  chapterText.clear(); chapterImages.clear(); chapterText.shrink_to_fit(); pages.clear();
   std::string text, error;
   chapterAnchors.clear();
-  if (!epub.chapter(index, text, error, epub.printedPages.empty() && !epub.hasToc ? nullptr : &chapterAnchors)) { showError(error.c_str()); return false; }
-  auto layout = layoutChapter(text, index, chapterAnchors);
+  if (!epub.chapter(index, text, error, epub.printedPages.empty() && !epub.hasToc ? nullptr : &chapterAnchors, &chapterImages)) { showError(error.c_str()); return false; }
+  auto layout = layoutChapter(text, index, chapterAnchors, chapterImages);
   if (layout.empty()) { showError("Cannot lay out this chapter"); return false; }
   chapterText = std::move(text);
   pages = std::move(layout);
@@ -222,7 +305,7 @@ static bool loadChapter(size_t index, uint32_t offset) {
   return true;
 }
 static bool openBook(const BookFile& file) {
-  bookInput.file.close(); bookOpen = false; pages.clear(); chapterText.clear();
+  bookInput.file.close(); bookOpen = false; pages.clear(); chapterText.clear(); chapterImages.clear();
   chapterPageCounts.clear(); indexing = false; readingControls = false;
   currentBook = file;
   std::string error;
@@ -241,7 +324,7 @@ static void openLibrary() {
   if (bleActive) return;
   indexing = false;
   persistPosition();
-  bookInput.file.close(); bookOpen = false; chapterText.clear(); pages.clear();
+  bookInput.file.close(); bookOpen = false; chapterText.clear(); chapterImages.clear(); pages.clear();
   chapterAnchors.clear();
   epub = reader::Epub{};
   scanLibrary();
@@ -257,14 +340,14 @@ static void openWifi() {
   if (!flashMounted) { showError("Internal storage is unavailable. Open Settings to initialize LittleFS."); return; }
   // File management must not delete a book while the reader holds it open.
   bookInput.file.close(); bookOpen = false;
-  chapterText.clear(); pages.clear(); chapterAnchors.clear(); chapterPageCounts.clear();
+  chapterText.clear(); chapterImages.clear(); pages.clear(); chapterAnchors.clear(); chapterPageCounts.clear();
   epub = reader::Epub{};
   startWifi(); view = View::Wifi; draw();
 }
 static void openBle() {
   persistPosition(); stopWifi(); indexing = false;
   bookInput.file.close(); bookOpen = false;
-  chapterText.clear(); pages.clear(); chapterAnchors.clear(); chapterPageCounts.clear();
+  chapterText.clear(); chapterImages.clear(); pages.clear(); chapterAnchors.clear(); chapterPageCounts.clear();
   epub = reader::Epub{};
   startBle(); view = View::Ble; draw();
 }
@@ -282,7 +365,7 @@ static void openJump(bool printed = true) {
   jumpPrinted = printed && !epub.printedPages.empty();
   indexing = !jumpPrinted && !reader::totalPages(chapterPageCounts);
   // The panel retains the page while its buffers are freed for indexing.
-  chapterText.clear(); chapterText.shrink_to_fit(); pages.clear();
+  chapterText.clear(); chapterImages.clear(); chapterText.shrink_to_fit(); pages.clear();
   chapterAnchors.clear();
   view = View::Jump; draw();
 }
@@ -304,7 +387,7 @@ static void jumpToChapter(size_t target) {
   uint32_t offset;
   if (!epub.chapterOffset(target, chapterAnchors, offset) ||
       (!chapterText.empty() && offset >= chapterText.size())) {
-    pages.clear(); chapterText.clear();
+    pages.clear(); chapterText.clear(); chapterImages.clear();
     showError("This chapter link is missing or has no text."); return;
   }
   pageIndex = reader::pageForOffset(pages, offset);
@@ -317,7 +400,7 @@ static void jumpToPrintedPage(size_t target) {
   if (!epub.printedPageOffset(target, chapterAnchors, offset) ||
       (!chapterText.empty() && offset >= chapterText.size())) {
     // Keep the current reading record intact when the publisher's link is bad.
-    pages.clear(); chapterText.clear();
+    pages.clear(); chapterText.clear(); chapterImages.clear();
     jumpMessage = "This page marker is missing or has no text.";
     view = View::Jump; draw(); return;
   }
@@ -331,12 +414,13 @@ static void indexNextChapter() {
   size_t chapter = next - chapterPageCounts.begin();
   std::string text, error;
   reader::Anchors anchors;
-  if (!epub.chapter(chapter, text, error, epub.printedPages.empty() && !epub.hasToc ? nullptr : &anchors)) {
+  std::vector<reader::Image> images;
+  if (!epub.chapter(chapter, text, error, epub.printedPages.empty() && !epub.hasToc ? nullptr : &anchors, &images)) {
     indexing = false;
     jumpMessage = "Cannot index chapter " + String(chapter + 1) + ": " + error.c_str();
     draw(); return;
   }
-  auto layout = layoutChapter(text, chapter, anchors);
+  auto layout = layoutChapter(text, chapter, anchors, images);
   chapterPageCounts[chapter] = layout.size();
   size_t remaining = std::count(chapterPageCounts.begin(), chapterPageCounts.end(), 0);
   if (!remaining) indexing = false;
@@ -382,7 +466,10 @@ static void turnPage(bool forward) {
 static void draw() {
   if (!ready) return;
   static bool lastInverted = false;
-  bool full = lastInverted != settings.inverted || view != View::Reading || readingControls || refreshCount % settings.fullRefresh == 0;
+  static bool lastReadingImage = false;
+  const auto* image = currentPageImage();
+  bool full = image || lastReadingImage || lastInverted != settings.inverted || view != View::Reading || readingControls || refreshCount % settings.fullRefresh == 0;
+  lastReadingImage = image != nullptr;
   lastInverted = settings.inverted;
   display.setEpdMode(full ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
   display.startWrite();
@@ -450,6 +537,7 @@ static void draw() {
       display.drawString(chapterText.substr(line.begin, line.end - line.begin).c_str(), 24, y);
       y += lineHeight;
     }
+    if (image) drawBookImage(*image);
     if (chapterText.empty()) label("[No text in this chapter]", 24, bodyTop + 30, 22);
     if (readingControls) {
       // Overlay controls without repaginating or moving the reading position.
@@ -734,7 +822,7 @@ static void handleAction(int action, bool audible) {
       if (bleActive) return;
       indexing = false;
       bookInput.file.close(); bookOpen = false;
-      chapterText.clear(); pages.clear(); chapterPageCounts.clear(); chapterAnchors.clear();
+      chapterText.clear(); chapterImages.clear(); pages.clear(); chapterPageCounts.clear(); chapterAnchors.clear();
       epub = reader::Epub{};
       // Render a status page before the blocking format operation.
       display.setEpdMode(epd_mode_t::epd_quality);

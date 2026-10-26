@@ -43,10 +43,20 @@ struct NavigationTarget {
   std::string fragment;
 };
 using Anchors = std::map<std::string, uint32_t>;
+struct Image {
+  uint32_t begin, end;
+  std::string path, alt;
+};
+enum class ImageFormat { Png, Jpeg };
+struct ImageInfo { uint32_t width, height; ImageFormat format; };
+// Validate dimensions before handing encoded bytes to a display decoder.
+bool imageInfo(const std::string& data, ImageInfo& info, std::string& error);
 class Epub {
 public:
   bool open(Input& input, Inflate inflate, std::string& error);
-  bool chapter(size_t index, std::string& text, std::string& error, Anchors* anchors = nullptr);
+  bool chapter(size_t index, std::string& text, std::string& error, Anchors* anchors = nullptr,
+               std::vector<Image>* images = nullptr);
+  bool image(const Image& image, std::string& data, ImageInfo& info, std::string& error);
   std::vector<uint32_t> pageBreakOffsets(size_t chapter, const Anchors& anchors) const;
   bool printedPageOffset(size_t page, const Anchors& anchors, uint32_t& offset) const;
   bool chapterOffset(size_t chapter, const Anchors& anchors, uint32_t& offset) const;
@@ -67,6 +77,10 @@ struct Page { uint32_t offset; std::vector<Line> lines; };
 using Measure = std::function<int(const std::string&)>;
 std::vector<Page> paginate(const std::string& text, int width, size_t linesPerPage,
                            const Measure& measure, const std::vector<uint32_t>& breaks = {});
+// Images occupy their own screens; indexing does not need to decode resources.
+std::vector<Page> paginateIllustrated(const std::string& text, int width, size_t linesPerPage,
+                           const Measure& measure, const std::vector<uint32_t>& breaks,
+                           const std::vector<Image>& images);
 size_t pageForOffset(const std::vector<Page>& pages, uint32_t offset);
 // Zero counts mean an unindexed chapter. Book page numbers are one-based;
 // resolved chapter and local page indexes are zero-based.

@@ -28,7 +28,7 @@ pio run -t upload
 
 The `m5-paper-s3` environment supplies the ESP32-S3, 16 MiB flash and octal PSRAM build configuration. Display, touch and SD wiring are configured for the PaperS3.
 
-The project uses a custom partition table. Back up existing internal files before switching from another firmware or partition layout. Upload the complete PlatformIO firmware, including its partition table, rather than only the application binary. Do not restore a filesystem image made for a different layout.
+The project uses a custom partition table with a 4 MiB firmware slot. This layout moves LittleFS from `0x310000` to `0x410000`; files from the older 3 MiB firmware layout must be backed up before updating and restored after initializing LittleFS with the new layout. Back up existing internal files before switching from another firmware or partition layout. Upload the complete PlatformIO firmware, including its partition table, rather than only the application binary. Do not restore a filesystem image made for a different layout.
 
 ### First boot
 
@@ -38,6 +38,8 @@ The project uses a custom partition table. Back up existing internal files befor
 4. Return to the library and tap a book to start reading.
 
 Storage mount failures never trigger automatic formatting. SD books can be read even when internal storage is uninitialized.
+
+For a first book, upload the included [PaperS3 Project Guide](books/PaperS3-Project-Guide.epub) over Wi-Fi or BLE, or copy it to your SD card. This sample EPUB introduces the project in six chapters and includes a table of contents and twelve page markers for exploring navigation.
 
 ## Library and reading
 
@@ -113,6 +115,16 @@ BLE transfers are slower than Wi-Fi. Keep the browser page open and the reader n
 
 BLE always requires the access code, even when Wi-Fi sign-in is disabled. The code controls application access; BLE pairing/encryption is not configured. Bluetooth stops when you leave the mode, switch to Wi-Fi, press Off, or leave it idle for five minutes.
 
+## Image preparation before upload
+
+Both upload pages have **Optimize JPEG images for PaperS3**, enabled by default. Before transferring the book, your browser converts progressive JPEGs to baseline JPEGs and scales oversized JPEGs to fit within 540 × 960 pixels while preserving their proportions. Conversion uses 90% JPEG quality. This reduces the ESP32's decoding memory requirements and can reduce transfer time and storage use.
+
+Preparation happens entirely in your browser. Your original EPUB stays unchanged; only the prepared copy is uploaded, using the same filename and internal resource paths. Text, metadata and non-JPEG resources are preserved. The page shows preparation progress and supports cancellation before transfer starts. Storage checks and BLE checksums use the prepared file.
+
+The hosted BLE page uses the shared scripts in `web/epub-prepare.js` and `web/vendor/fflate.js`. The bundled [fflate](https://github.com/101arrowz/fflate) 0.8.3 library is MIT licensed; its notice is included with the script and in `web/vendor/fflate-LICENSE.txt`.
+
+Turn the option off to upload the original EPUB without conversion. Preparation supports books up to 64 MiB and individual JPEG resources up to 16 MiB / 32 megapixels. Signed EPUBs cannot be modified. If preparation fails, the page shows an error and does not upload a partial result. The compression library is bundled locally, including in the firmware's Wi-Fi page; no external conversion service or CDN is used.
+
 ## Settings with ESPConfig
 
 For USB configuration, connect the reader, close any serial monitor, and open [ESPConfig](https://fbiego.com/espconfig/) in a browser supporting Web Serial. Choose **Connect Serial**, select the PaperS3 port, adjust settings and save. For wireless configuration, first open **Bluetooth** on the reader and choose **Connect BLE** in ESPConfig.
@@ -152,8 +164,8 @@ The custom layout prioritizes book storage on the 16 MiB flash:
 | --- | --- | --- |
 | NVS: settings and reading records | `0x9000` | 24 KiB |
 | PHY | `0xF000` | 4 KiB |
-| Firmware | `0x10000` | 3 MiB |
-| LittleFS | `0x310000` | 12.9375 MiB |
+| Firmware | `0x10000` | 4 MiB |
+| LittleFS | `0x410000` | 11.9375 MiB |
 
 Usable file space is lower because of filesystem overhead. The partition uses the Arduino core's `spiffs` label/subtype but is mounted as LittleFS. There is one firmware slot and no OTA partition; firmware updates use USB.
 
@@ -163,8 +175,24 @@ Reading records share the finite NVS partition. The UI reports a save failure if
 
 ## EPUB support and limitations
 
-The reader is designed for DRM-free text EPUBs with reflowable content. It supports EPUB manifest/spine reading order, well-formed XHTML, UTF-8 text, common HTML entities, paragraph breaks, image alt text, EPUB 3 navigation and EPUB 2 NCX navigation.
+The reader is designed for DRM-free EPUBs with reflowable content. It supports EPUB manifest/spine reading order, well-formed XHTML, UTF-8 text, common HTML entities, paragraph breaks, EPUB 3 navigation and EPUB 2 NCX navigation.
 
-CSS layout, embedded fonts, illustrations, fixed-layout rendering, table grids, DRM, ZIP64 and multi-disk archives are not supported. The bundled font does not cover every Unicode character, and complex-script or right-to-left shaping is not implemented. CFI navigation targets are not supported.
+### Images
+
+Embedded PNG and baseline or progressive JPEG images appear on their own screens between the surrounding text. Images are scaled down to fit while preserving their proportions, centered, and converted to grayscale with dithering. Small images are kept at their original size. Alt text appears as a short caption when provided. Image screens participate in page counts, bookmarks and saved reading positions.
+
+Images retain their normal grayscale appearance in inverted mode; transparent areas use white. Raster images inside SVG cover wrappers are supported, but SVG vector artwork, GIF, WebP, lossless or 12-bit JPEG, interlaced PNG and external image URLs are not. Missing, oversized or undecodable images show a message and any available alt text, so reading can continue.
+
+Image resources are limited to 2 MiB each, 4096 pixels per dimension and 4 megapixels total, with up to 512 image references per chapter. JPEG decoding uses libjpeg-turbo with PSRAM allocations, a shared 4 MiB limit for codec/output buffers, a 512 KiB PSRAM reserve and a 128-scan limit. Large progressive images can exceed the memory budget even when they meet the dimension limits; these show an error instead of loading. Only the visible image is extracted and decoded; page indexing uses its position without loading image bytes. Image screens use a quality refresh. Firmware project logos continue to use the supplied 1-bit bitmaps; browser pages use the original PNG.
+
+### Other limits
+
+CSS layout, embedded fonts, fixed-layout rendering, table grids, DRM, ZIP64 and multi-disk archives are not supported. The bundled font does not cover every Unicode character, and complex-script or right-to-left shaping is not implemented. CFI navigation targets are not supported.
 
 Resource limits include 1 MiB per expanded chapter, 2 MiB per compressed resource, 512 KiB for OPF metadata, 64 KiB for container XML, and 256 KiB per navigation resource. Archives are limited to 8192 entries, reading order to 4096 sections, and navigation lists to 4096 entries. Additional filename and XML-complexity limits bound memory use. Oversized books may report an error or omit optional navigation; splitting large chapters improves compatibility.
+
+## JPEG decoder attribution
+
+JPEG decoding uses a vendored portable build of [libjpeg-turbo 3.2.0](https://github.com/libjpeg-turbo/libjpeg-turbo/tree/3.2.0). Its license notices and integration details are included in [lib/LibJpegTurbo](lib/LibJpegTurbo).
+
+This software is based in part on the work of the Independent JPEG Group.

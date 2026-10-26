@@ -1,0 +1,11 @@
+{
+    "m5-paper-s3": {
+        "id": "m5-paper-s3",
+        "name": "M5 Paper S3",
+        "file": "m5-paper-s3_dev_0x0.bin",
+        "address": "0x0",
+        "size": 3303504,
+        "chip": "ESP32-S3",
+        "board_slug": "m5-paper-s3"
+    }
+}

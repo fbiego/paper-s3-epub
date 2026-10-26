@@ -309,6 +309,16 @@ static void setupRoutes() {
     server.send_P(200, "image/png", reinterpret_cast<const char*>(projectLogoStart),
                   projectLogoEnd - projectLogoStart);
   });
+  server.on("/epub-prepare.js", HTTP_GET, [] {
+    if (!requireAuth()) return;
+    server.send_P(200, "text/javascript; charset=utf-8", reinterpret_cast<const char*>(epubPrepareStart),
+                  epubPrepareEnd - epubPrepareStart);
+  });
+  server.on("/vendor/fflate.js", HTTP_GET, [] {
+    if (!requireAuth()) return;
+    server.send_P(200, "text/javascript; charset=utf-8", reinterpret_cast<const char*>(fflateStart),
+                  fflateEnd - fflateStart);
+  });
   server.on("/api/storage", HTTP_GET, [] {
     if (!requireAuth()) return;
     const size_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();

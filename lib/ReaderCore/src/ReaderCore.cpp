@@ -80,7 +80,7 @@ bool Zip::extract(const std::string& name, std::string& output, std::string& err
   if ((entry->flags & 1) || (entry->method != 0 && entry->method != 8))
     return fail(error, "Encrypted or unsupported ZIP compression");
   if (entry->expanded > limit || entry->compressed > 2 * 1024 * 1024)
-    return fail(error, "EPUB chapter exceeds memory limit (1 MiB)");
+    return fail(error, "EPUB resource exceeds memory limit");
   uint8_t header[30];
   if (!input_->read(entry->offset, header, sizeof(header)) || u32(header) != 0x04034b50)
     return fail(error, "Broken ZIP entry");
@@ -340,7 +340,8 @@ static void flushAnchors(Anchors* anchors, std::vector<std::string>& pending, si
   pending.clear();
 }
 static void extractText(tinyxml2::XMLNode* node, std::string& out, Anchors* anchors,
-                        std::vector<std::string>& pending) {
+                        std::vector<std::string>& pending, const std::string& base,
+                        std::vector<Image>* images) {
   if (auto* t = node->ToText()) {
     // XML entities have already been decoded once by tinyxml2.
     // Remaining HTML entities are decoded before XML parsing instead.
@@ -355,7 +356,7 @@ static void extractText(tinyxml2::XMLNode* node, std::string& out, Anchors* anch
   auto* element = node->ToElement();
   if (!element) return;
   std::string tag = localName(element->Name());
-  if (tag == "head" || tag == "script" || tag == "style" || tag == "svg") return;
+  if (tag == "head" || tag == "script" || tag == "style" || (tag == "svg" && !images)) return;
   if (anchors) {
     const char* id = attribute(element, "id");
     if (!id && tag == "a") id = element->Attribute("name");
@@ -364,6 +365,34 @@ static void extractText(tinyxml2::XMLNode* node, std::string& out, Anchors* anch
   bool block = tag == "p" || tag == "div" || tag == "br" || tag == "li" || tag == "section" ||
                tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "tr" || tag == "blockquote";
   if (block) paragraph(out);
+  if (images && (tag == "img" || tag == "image")) {
+    paragraph(out);
+    flushAnchors(anchors, pending, out.size());
+    if (images->size() >= 512) {
+      out += "[Additional image omitted]";
+      paragraph(out);
+      return;
+    }
+    const char* src = tag == "img" ? element->Attribute("src") : attribute(element, "href");
+    const char* alt = element->Attribute("alt");
+    Image image{uint32_t(out.size()), 0, "", alt ? alt : ""};
+    // Never fetch network/data URLs. Resolve ordinary EPUB-relative resources.
+    if (src && std::strlen(src) <= 1024 && !std::strchr(src, ':') &&
+        std::strncmp(src, "//", 2)) image.path = normalizedPath(base, src);
+    // A short placeholder supplies a stable location even for missing images.
+    // Keep alt text bounded, without cutting through a UTF-8 character.
+    if (image.alt.size() > 256) {
+      size_t end = 256;
+      while (end && (uint8_t(image.alt[end]) & 0xc0) == 0x80) --end;
+      image.alt.resize(end);
+    }
+    for (char& c : image.alt) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    out += '['; out += image.alt.empty() ? "Image" : image.alt; out += ']';
+    image.end = out.size();
+    images->push_back(std::move(image));
+    paragraph(out);
+    return;
+  }
   if (tag == "img") {
     if (const char* alt = element->Attribute("alt")) {
       if (!out.empty() && out.back() != ' ' && out.back() != '\n') out += ' ';
@@ -371,13 +400,15 @@ static void extractText(tinyxml2::XMLNode* node, std::string& out, Anchors* anch
       out += '['; out += alt; out += "] ";
     }
   }
-  for (auto* c = node->FirstChild(); c; c = c->NextSibling()) extractText(c, out, anchors, pending);
+  for (auto* c = node->FirstChild(); c; c = c->NextSibling()) extractText(c, out, anchors, pending, base, images);
   if (block) paragraph(out);
 }
 
-bool Epub::chapter(size_t index, std::string& text, std::string& error, Anchors* anchors) {
+bool Epub::chapter(size_t index, std::string& text, std::string& error, Anchors* anchors,
+                   std::vector<Image>* images) {
   text.clear();
   if (anchors) anchors->clear();
+  if (images) images->clear();
   if (index >= spine.size()) return fail(error, "Chapter out of range");
   std::string xml;
   if (!zip_.extract(spine[index], xml, error)) return false;
@@ -407,10 +438,63 @@ bool Epub::chapter(size_t index, std::string& text, std::string& error, Anchors*
   if (!doc.RootElement()) return fail(error, "Empty XHTML document");
   auto* body = child(doc.RootElement(), "body");
   std::vector<std::string> pending;
-  extractText(body ? body : doc.RootElement(), text, anchors, pending);
+  const size_t slash = spine[index].find_last_of('/');
+  const std::string base = slash == std::string::npos ? "" : spine[index].substr(0, slash + 1);
+  extractText(body ? body : doc.RootElement(), text, anchors, pending, base, images);
   while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
   flushAnchors(anchors, pending, text.size());
   return true;
+}
+
+static uint32_t big32(const uint8_t* p) {
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+bool imageInfo(const std::string& data, ImageInfo& info, std::string& error) {
+  error.clear();
+  info = {0, 0, ImageFormat::Png};
+  const auto* p = reinterpret_cast<const uint8_t*>(data.data());
+  const size_t size = data.size();
+  if (size >= 33 && !std::memcmp(p, "\x89PNG\r\n\x1a\n", 8) &&
+      big32(p + 8) == 13 && !std::memcmp(p + 12, "IHDR", 4)) {
+    info = {big32(p + 16), big32(p + 20), ImageFormat::Png};
+    if (p[26] || p[27] || p[28]) return fail(error, "Unsupported PNG encoding (interlaced images are not supported)");
+  } else if (size >= 4 && p[0] == 0xff && p[1] == 0xd8) {
+    size_t pos = 2;
+    bool found = false;
+    while (pos < size) {
+      if (p[pos++] != 0xff) return fail(error, "Invalid JPEG marker");
+      while (pos < size && p[pos] == 0xff) ++pos;
+      if (pos >= size) break;
+      const uint8_t marker = p[pos++];
+      if (marker == 0xd9 || marker == 0xda) break;
+      if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (size - pos < 2) break;
+      const size_t length = (size_t(p[pos]) << 8) | p[pos + 1];
+      if (length < 2 || length > size - pos) return fail(error, "Truncated JPEG segment");
+      if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc) {
+        if ((marker != 0xc0 && marker != 0xc1 && marker != 0xc2) || length < 8 || p[pos + 2] != 8)
+          return fail(error, "Only 8-bit sequential or progressive JPEG images are supported");
+        const uint8_t components = p[pos + 7];
+        if ((components != 1 && components != 3 && components != 4) || length < size_t(8 + 3 * components))
+          return fail(error, "Unsupported JPEG color format");
+        info = {uint32_t(p[pos + 5]) * 256 + p[pos + 6],
+                uint32_t(p[pos + 3]) * 256 + p[pos + 4], ImageFormat::Jpeg};
+        found = true; break;
+      }
+      pos += length;
+    }
+    if (!found) return fail(error, "JPEG dimensions not found");
+  } else return fail(error, "Only PNG and JPEG images are supported");
+  if (!info.width || !info.height || info.width > 4096 || info.height > 4096 ||
+      uint64_t(info.width) * info.height > 4 * 1024 * 1024)
+    return fail(error, "Image exceeds 4096px / 4 megapixel limit");
+  return true;
+}
+bool Epub::image(const Image& image, std::string& data, ImageInfo& info, std::string& error) {
+  data.clear();
+  if (image.path.empty()) return fail(error, "Missing or external image source");
+  if (!zip_.extract(image.path, data, error, 2 * 1024 * 1024)) return false;
+  return imageInfo(data, info, error);
 }
 
 static size_t nextCharacter(const std::string& text, size_t pos) {
@@ -455,6 +539,35 @@ std::vector<Page> paginate(const std::string& text, int width, size_t linesPerPa
     }
   }
   if (!page.lines.empty() || pages.empty()) pages.push_back(std::move(page));
+  return pages;
+}
+std::vector<Page> paginateIllustrated(const std::string& text, int width, size_t linesPerPage,
+                           const Measure& measure, const std::vector<uint32_t>& breaks,
+                           const std::vector<Image>& images) {
+  if (images.empty()) return paginate(text, width, linesPerPage, measure, breaks);
+  std::vector<Page> pages;
+  if (width <= 0 || !linesPerPage) return pages;
+  size_t cursor = 0;
+  auto appendText = [&](size_t begin, size_t end) {
+    while (begin < end && (text[begin] == '\n' || text[begin] == ' ')) ++begin;
+    if (begin == end) return;
+    std::vector<uint32_t> localBreaks;
+    for (uint32_t offset : breaks) if (offset > begin && offset < end) localBreaks.push_back(offset - begin);
+    auto section = paginate(text.substr(begin, end - begin), width, linesPerPage, measure, localBreaks);
+    for (auto& page : section) {
+      page.offset += begin;
+      for (auto& line : page.lines) { line.begin += begin; line.end += begin; }
+      pages.push_back(std::move(page));
+    }
+  };
+  for (const auto& image : images) {
+    if (image.begin < cursor || image.end <= image.begin || image.end > text.size()) continue;
+    appendText(cursor, image.begin);
+    pages.push_back({image.begin, {}});
+    cursor = image.end;
+  }
+  appendText(cursor, text.size());
+  if (pages.empty()) pages.push_back({0, {}});
   return pages;
 }
 size_t pageForOffset(const std::vector<Page>& pages, uint32_t offset) {
