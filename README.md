@@ -4,6 +4,9 @@ A touch-operated EPUB reader for the **M5Stack PaperS3**, with internal LittleFS
 
 Built with Arduino, [M5GFX](https://github.com/m5stack/M5GFX), tinyxml2, NimBLE-Arduino and [ESPConfig](https://github.com/fbiego/ESPConfig). The firmware targets the PaperS3's 16 MiB flash and 8 MiB PSRAM.
 
+
+<a href="https://espverse.com/missions/paper-s3-epub"><img src="https://espverse.com/assets/images/espverse_badge.png" alt="Flashable on ESPVerse" width="200"></a>
+
 ## Features
 
 - Browse EPUBs from internal storage and an optional SD card.
@@ -16,6 +19,20 @@ Built with Arduino, [M5GFX](https://github.com/m5stack/M5GFX), tinyxml2, NimBLE-
 - View estimated battery percentage and charging status in the library.
 - Enable button clicks and startup/shutdown sounds using the GPIO21 buzzer.
 - Use idle light sleep while reading, or the library's Off button for deep sleep.
+
+## UI previews
+
+
+| Library | Reading | Reading controls | Settings |
+| --- | --- | --- | --- |
+| <a href="docs/images/library.png"><img src="docs/images/library.png" width="180" alt="Library preview"></a> | <a href="docs/images/reading.png"><img src="docs/images/reading.png" width="180" alt="Reading preview"></a> | <a href="docs/images/reading-controls.png"><img src="docs/images/reading-controls.png" width="180" alt="Reading controls preview"></a> | <a href="docs/images/settings.png"><img src="docs/images/settings.png" width="180" alt="Settings preview"></a> |
+
+| Touch guide | Chapters | Go to page | Powered off |
+| --- | --- | --- | --- |
+| <a href="docs/images/touch-guide.png"><img src="docs/images/touch-guide.png" width="180" alt="Full-screen touch guide preview"></a> | <a href="docs/images/chapters.png"><img src="docs/images/chapters.png" width="180" alt="Chapter navigation preview"></a> | <a href="docs/images/go-to-page.png"><img src="docs/images/go-to-page.png" width="180" alt="Page navigation preview"></a> | <a href="docs/images/off.png"><img src="docs/images/off.png" width="180" alt="Off screen preview"></a> |
+
+Additional previews: [inverted reading](docs/images/reading-inverted.png), [Wi-Fi access](docs/images/wifi.png), and [Bluetooth access](docs/images/bluetooth.png).
+
 
 ## Build and install
 
